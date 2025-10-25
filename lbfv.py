@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import argparse
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
@@ -310,7 +311,7 @@ def parse_dir_entries(data: bytes, hdr: LBFHeader) -> List[LBFDirEnt]:
 
 
 def parse_segments(lbf: LBFFile, de: LBFDirEnt) -> List[LBFSegDesc]:
-    fmt = "<HBBIIIIII"
+    fmt = "<HBBIIIII"
     sz = struct.calcsize(fmt)
     raw = safe_slice(lbf.data, de.offset, de.size)
     out: List[LBFSegDesc] = []
@@ -321,7 +322,7 @@ def parse_segments(lbf: LBFFile, de: LBFDirEnt) -> List[LBFSegDesc]:
         (
             seg_index,
             seg_type,
-            reserved,
+            _reserved,
             vlimit,
             alignment,
             sect_start,
@@ -343,7 +344,7 @@ def parse_segments(lbf: LBFFile, de: LBFDirEnt) -> List[LBFSegDesc]:
 
 
 def parse_sections(lbf: LBFFile, de: LBFDirEnt) -> List[LBFSection]:
-    fmt = "<IHHIIIIIII"
+    fmt = "<IHHIIIIII"
     sz = struct.calcsize(fmt)
     raw = safe_slice(lbf.data, de.offset, de.size)
     out: List[LBFSection] = []
@@ -542,42 +543,55 @@ def parse_symstr(lbf: LBFFile, de: LBFDirEnt) -> List[SymStrPart]:
 
 def parse_security(lbf: LBFFile, de: LBFDirEnt) -> List[LBFSecurityEntry]:
     fmt = "<IIII"
-    sz = struct.calcsize(fmt)
+    header_sz = struct.calcsize(fmt)
+
     raw = safe_slice(lbf.data, de.offset, de.size)
 
-    out: List[LBFSecurityEntry] = []
+    if len(raw) < header_sz:
+        return []
 
-    n = de.count if de.count > 0 else (len(raw) // sz)
+    (alg_id, data_off, data_sz, flags) = struct.unpack_from(fmt, raw, 0)
 
-    for i in range(n):
-        off = i * sz
-        if off + sz > len(raw):
-            break
-        (alg_id, data_off, data_sz, flags) = struct.unpack_from(fmt, raw, off)
-        sig = b""
-        if 0 <= data_off < len(raw) and data_off + data_sz <= len(raw):
-            sig = raw[data_off : data_off + data_sz]
-        out.append(
-            LBFSecurityEntry(
-                alg_id=alg_id,
-                data_off=data_off,
-                data_sz=data_sz,
-                flags=flags,
-                sig_bytes=sig,
-            )
-        )
+    sig = b""
+    if 0 <= data_off <= len(raw) and data_off + data_sz <= len(raw):
+        sig = raw[data_off : data_off + data_sz]
 
-    return out
+    entry = LBFSecurityEntry(
+        alg_id=alg_id,
+        data_off=data_off,
+        data_sz=data_sz,
+        flags=flags,
+        sig_bytes=sig,
+    )
+
+    return [entry]
 
 
-def build_lbf(filepath: Path) -> LBFFile:
+def build_lbf(filepath: Path, debug: bool = False) -> LBFFile:
     data = filepath.read_bytes()
 
+    if debug:
+        print(f"[build_lbf] reading {filepath} ({len(data)} bytes)")
+
     header = parse_header(data)
+    if debug:
+        print("[build_lbf] parsed header OK")
+        print(pretty_header(header))
+        print()
+
     if header.magic != LBF_MAGIC:
         raise ValueError(f"Bad magic 0x{header.magic:08X}, expected 0x{LBF_MAGIC:08X}")
 
     dir_entries = parse_dir_entries(data, header)
+    if debug:
+        print("[build_lbf] parsed directory entries OK")
+        for i, de in enumerate(dir_entries):
+            tname = LBF_TABLE_TYPE.get(de.type, f"UNKNOWN({de.type})")
+            print(
+                f"  dir[{i}]: type={de.type}({tname}) off=0x{de.offset:08X} "
+                f"size={de.size} count={de.count}"
+            )
+        print()
 
     lbf = LBFFile(
         filepath=filepath,
@@ -586,41 +600,75 @@ def build_lbf(filepath: Path) -> LBFFile:
         dir_entries=dir_entries,
     )
 
-    for de in dir_entries:
+    for i, de in enumerate(dir_entries):
         tname = LBF_TABLE_TYPE.get(de.type, f"UNKNOWN({de.type})")
+        if debug:
+            print(
+                f"[build_lbf] parsing table {i}: {tname} "
+                f"(type={de.type}) off=0x{de.offset:08X} size={de.size} count={de.count}"
+            )
 
         if de.offset + de.size > len(data):
+            if debug:
+                print("  -> SKIP: table goes past EOF?")
             continue
 
         if de.type == 1:
             lbf.segments = parse_segments(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.segments)} segment(s)")
 
         elif de.type == 2:
             lbf.sections = parse_sections(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.sections)} section(s)")
 
         elif de.type == 5:
             lbf.deps = parse_deps(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.deps)} dep(s)")
 
         elif de.type == 9:
             lbf.imports = parse_imports(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.imports)} import(s)")
 
         elif de.type == 3:
             lbf.relocs = parse_relocs(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.relocs)} reloc slot(s)")
 
         elif de.type == 4:
             lbf.exports = parse_exports(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.exports)} export(s)")
 
         elif de.type == 8:
             lbf.strtab = parse_strtab(lbf, de)
+            if debug:
+                print(f"  parsed strtab ({len(lbf.strtab)} bytes)")
 
         elif de.type == 10:
             lbf.symidx_parts = parse_symidx(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.symidx_parts)} symidx part(s)")
 
         elif de.type == 11:
             lbf.symstr_parts = parse_symstr(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.symstr_parts)} symstr part(s)")
 
         elif de.type == 7:
             lbf.security_entries = parse_security(lbf, de)
+            if debug:
+                print(f"  parsed {len(lbf.security_entries)} security entr(y/ies)")
+
+        else:
+            if debug:
+                print("  -> unhandled table type, ignoring")
+
+        if debug:
+            print()
 
     return lbf
 
@@ -717,11 +765,10 @@ def pretty_reloc(ix: int, rel: LBFRELOCSEntry) -> str:
         mode = "SELF_IMPORT"
         target_desc = (
             f"seg_ordinal={rel.import_ix & 0xFFFF} "
-            "(loader must write selector16 of that seg)"
         )
     else:
         mode = "EXTERNAL IMPORT"
-        target_desc = f"imports[{rel.import_ix}] (patch from dep symbol)"
+        target_desc = f"imports[{rel.import_ix}]"
 
     return (
         "== Reloc Slot ==\n"
@@ -821,6 +868,68 @@ def make_getstr(strtab: bytes):
         return strtab[off:end].decode("utf-8", errors="replace")
 
     return getstr
+
+
+def build_text_report(lbf: LBFFile) -> str:
+    lines: List[str] = []
+
+    getstr = make_getstr(lbf.strtab)
+
+    lines.append(pretty_header(lbf.header))
+    lines.append("")
+    lines.append(pretty_dirents(lbf))
+    lines.append("")
+
+    if lbf.segments:
+        for seg in lbf.segments:
+            lines.append(pretty_segment(seg))
+            lines.append("")
+
+    if lbf.sections:
+        for sec in lbf.sections:
+            lines.append(pretty_section(sec, getstr))
+            lines.append("")
+
+    if lbf.deps:
+        for ix, dep in enumerate(lbf.deps):
+            lines.append(pretty_dep(ix, dep, getstr))
+            lines.append("")
+
+    if lbf.imports:
+        for ix, imp in enumerate(lbf.imports):
+            lines.append(pretty_import(ix, imp, getstr, lbf.deps))
+            lines.append("")
+
+    if lbf.relocs:
+        for ix, rel in enumerate(lbf.relocs):
+            lines.append(pretty_reloc(ix, rel))
+            lines.append("")
+
+    if lbf.exports:
+        for ix, ex in enumerate(lbf.exports):
+            lines.append(pretty_export(ix, ex, getstr))
+            lines.append("")
+
+    if lbf.strtab:
+        lines.append(pretty_strtab_preview(lbf.strtab))
+        lines.append("")
+
+    if lbf.symidx_parts:
+        for ix, part in enumerate(lbf.symidx_parts):
+            lines.append(pretty_symidx_part(ix, part))
+            lines.append("")
+
+    if lbf.symstr_parts:
+        for ix, part in enumerate(lbf.symstr_parts):
+            lines.append(pretty_symstr_part(ix, part, getstr))
+            lines.append("")
+
+    if lbf.security_entries:
+        for ix, sec in enumerate(lbf.security_entries):
+            lines.append(pretty_security_entry(ix, sec))
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 class LBFViewerApp(tk.Tk):
@@ -1036,29 +1145,56 @@ class LBFViewerApp(tk.Tk):
                 self.add_node(ss_root_id, label, text)
 
         if lbf.security_entries:
-            sec_root_txt = (
-                "SECURITY table\n" + f"{len(lbf.security_entries)} entr(y/ies)"
-            )
+            sec_root_txt = "SECURITY table (signature block)"
             sec_root_id = self.add_node(
                 dir_id,
-                f"SECURITY ({len(lbf.security_entries)})",
+                "SECURITY",
                 sec_root_txt,
                 open_node=False,
             )
             for ix, sec in enumerate(lbf.security_entries):
-                label = f"security[{ix}] alg=0x{sec.alg_id:08X}"
+                label = f"alg=0x{sec.alg_id:08X}, {sec.data_sz} bytes"
                 text = pretty_security_entry(ix, sec)
                 self.add_node(sec_root_id, label, text)
+
 
         self.tree.selection_set(root_id)
         self.on_tree_select()
 
 
 def main():
-    initial: Optional[Path] = None
-    if len(sys.argv) >= 2:
-        initial = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(
+        description="LBF Viewer / Dumper (LAOMB binfmt v1.0)"
+    )
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Parse FILE, dump debug info while parsing, then print full report to stdout (no GUI).",
+    )
+    parser.add_argument(
+        "file",
+        nargs="?",
+        help="LBF file to open (for --text mode or initial GUI load)",
+    )
 
+    args = parser.parse_args()
+
+    if args.text:
+        if not args.file:
+            parser.error("FILE required in --text mode")
+        p = Path(args.file)
+        try:
+            lbf = build_lbf(p, debug=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to parse: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print()
+        print("===== FINAL STRUCTURED DUMP =====")
+        print(build_text_report(lbf))
+        return
+
+    initial: Optional[Path] = Path(args.file) if args.file else None
     app = LBFViewerApp(initial_file=initial)
     app.mainloop()
 

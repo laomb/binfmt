@@ -65,7 +65,7 @@ typedef struct {
 |  Bit | Name         | Meaning                                                           |
 | ---: | ------------ | ----------------------------------------------------------------- |
 |    0 | NX_EMU       | Request NX emulation: materialize non-code segments as non-exec.  |
-|    1 | RELRO        | After binding, make relocation stubs/slots read-only if possible. |
+|    1 | -            | Reserved (0)                                                      |
 |    2 | SAFE_IMPORTS | Disallow binding to call/task gates unless explicitly requested.  |
 | 31:3 | -            | Reserved (0).                                                     |
 
@@ -165,7 +165,7 @@ typedef struct {
 **Loader MUST:**
 
 * Copy `file_sz` bytes from `file_off` to `(seg_base + mem_off)`; then zero `mem_sz - file_sz`.
-* Ensure `mem_off + mem_sz - 1 <= vlimit - 1`.
+* Ensure `mem_off + mem_sz - 1 <= vlimit - 1`, inclusive.
 
 ---
 
@@ -226,10 +226,10 @@ typedef struct {
 } LBFRELOCSEntry;        // order irrelevant
 ```
 
-**Relocation flags:** `0x0` EXTERNAL IMPORT, `0x1` SELF IMPORT (see below); others value MUST fail.
+**Relocation flags:** `0x0`: `LBF_RF_EXTERNAL`, `0x1`: `LBF_RF_SELF_IMPORT` (see below); others value MUST fail.
 
-If `LBFRELOCSEntry.flags` is `0x0`, `LBFRELOCSEntry.import_ix` is an index into `LBF_T_IMPORTS`.
-However if `LBFRELOCSEntry.flags` is `0x1`, `LBFRELOCSEntry.import_ix`s low 2 bytes define a segment ordinal and the high 2 bytes are reserved (0).
+If `LBFRELOCSEntry.flags` is `LBF_RF_EXTERNAL`, `LBFRELOCSEntry.import_ix` is an index into `LBF_T_IMPORTS`.
+However if `LBFRELOCSEntry.flags` is `LBF_RF_SELF_IMPORT`, `LBFRELOCSEntry.import_ix`s low 2 bytes define a segment ordinal and the high 2 bytes are reserved (0).
 In SELF-IMPORT mode, the `LBFRELOCSEntry.kind` must be `LBF_RELOCS_SEL16` and will have the loader fill the 2 byte selector value with the selector value of the requested segment. This is the only correct way to discover in-lbf defined segments that are not the entry code segment and entry data segment.
 
 **Loader MUST:**
@@ -237,7 +237,6 @@ In SELF-IMPORT mode, the `LBFRELOCSEntry.kind` must be `LBF_RELOCS_SEL16` and wi
 * Resolve `(dep_index, name/ordinal)` to an exported *(seg, off)* in the dependency.
 * For `FARPTR32`, write `{off32, sel16(dep_seg)}` into the 6-byte slot.
 * For `SEL16`, write the target selector.
-* If `RELRO` is set, mark sections hosting these slots read-only afterwards (typically `STUB` sections).
 
 ### 8.4 Exports (`LBF_T_EXPORTS`, type=4)
 
